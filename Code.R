@@ -31,29 +31,29 @@ url_time <- "&starttime=11:00&endtime=22:00"
 
 days <- c(1:30)
 
-# define the object "enddate" containing dates in proper format from 
+# define the object "endDate" containing dates in proper format from 
 # tomorrow day and throughout the following 30 days.
 
-enddate <- mapply(function(a, b) a + b, tomorrow, days)
+endDate <- mapply(function(a, b) a + b, tomorrow, days)
 
 # convert the vector from double to date format "%d/%m/%Y"
 
-enddate <- as.Date(enddate, origin = "1970-01-01")
+endDate <- as.Date(endDate, origin = "1970-01-01")
 
 # clean the fold "download/"
 
 unlink("~/rstudio/parkvia/download/*")
 
 # Since I do not want to return any value but iterate through each value in the
-# object "enddate", I use purrr::walk function to save the html files so that
+# object "endDate", I use purrr::walk function to save the html files so that
 # I can scrape them afterwards. Original code from Mikkel Freltoft Krogsholm.
 
-walk(enddate, function(dates){
+walk(endDate, function(dates){
   
   file_day <- str_extract(dates, "\\d\\w+$")
   
-  # define the URL for each "enddate" date contained in the object  
-  url_page <- str_glue("{base_url}{tomorrow}&enddate={dates}{url_time}")
+  # define the URL for each "endDate" date contained in the object  
+  url_page <- str_glue("{base_url}{tomorrow}&endDate={dates}{url_time}")
   
   message(str_glue("\nFetching: {url_page}"))
           
@@ -168,7 +168,8 @@ Sys.sleep(10)
 all_parks_cleaned <- all_park %>% 
   group_by(n_days) %>% 
   filter(first_price != "Not Available") %>% 
-  mutate(price = as.numeric(str_extract(total_price, "\\d.+"))) %>% 
+  mutate(price = as.numeric(str_extract(total_price, "\\d.+")), # Price column
+  position = row_number(price)) %>% # Position column based on prices applied
   select(-first_price, -total_price) %>% 
   arrange(n_days, price)
 
@@ -183,7 +184,7 @@ all_parks_min <- all_parks_cleaned %>%
 
 # write a CSV file
 
-write.csv(all_parks_min, "~/path.../parkvia_min.csv", fileEncoding = "UTF-8")
+write.csv(all_parks_min, "~/path.../parkvia_min.csv", fileEncoding = "UTF-8") # Write a proper path to the file to be opened
 
 # create a summary tibble data frame
 
@@ -218,4 +219,4 @@ price_summary <- tibble(all_parks_sum, "2nd_pos_price" = sec_pos$price)
 
 # write the summary CSV file
 
-write.csv(price_summary, "~/path.../price_summary.csv", fileEncoding = "UTF-8")
+write.csv(price_summary, "~/yourpath.../price_summary.csv", fileEncoding = "UTF-8") # Write a proper path to the file to be opened
