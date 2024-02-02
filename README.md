@@ -1,5 +1,5 @@
 # Scrape-an-Online-Parking-Booking-Platform-With-R
-_Web scrape a book parking comparison website for a data-driven pricing strategy_
+_Web scrape a book parking comparison website for a data-driven pricing strategy in the travel/tourism industry_
 
 ## Business Understanding
 
