@@ -1,222 +1,173 @@
-# Libraries
+# Import libraries
 
-library(RSelenium)
-library(rvest)
-library(purrr)
+library(tibble)
 library(dplyr)
-library(stringr)
-library(tidyverse)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(tsibble)
+library(tsibbledata)
+library(feasts)
+library(fable)
+library(fabletools)
 
-# Initiate a new remote driver and connect to the remote Selenium server
+# Data set URL: https://www.adr.it/web/aeroporti-di-roma-en/bsn-traffic-data
+# import CSV file
+# Type your directory path along with the CSV file name in "~/..your_path/filename.csv"
 
-remDr <- remoteDriver(
-  remoteServerAddr = "selenium",
-  port = 4444
-)
-remDr$open()
+search_pass <- read.csv("~/Documents/R-projects/Google Ads/googleads_search_volume.csv", fileEncoding = "UTF-8")
 
-# define the base URL
+# Create a Tsibble object (time series tibble object) modifying the variable 
+# named "yearmonth" of type: yearmonth(), using the nested function lubridate::my()
+# since the original format is of type: "mm-YYYY"
+# I will set "yearmonth" as the required index.
 
-base_url <- "https://www.parkvia.com/en-GB/book/results?producttype=P&location=MXP&startdate="
+# Since January 2018 is the first raw, the corresponding variation for these 
+# records will have na's, which can cause issues when applying modelling, I will 
+# cut off the entire raw
 
-# define the object "tomorrow" for setting the first day of the query
+# "ts" stands for time series
 
-tomorrow <- Sys.Date() + 1
+gads_ts <- search_pass |> 
+  mutate(date = yearmonth(my(yearmonth))) |> 
+  filter(!is.na(Var_search)) |> 
+  as_tsibble(index = date) |> 
+  relocate(date, 1) |> 
+  select(-yearmonth, -Search.Volume, -Num_passengers)
 
-# define the time part of the URL, which is fixed for the purposes of this work
+# Inspect % Search Volume variation against % passengers in the time frame
 
-url_time <- "&starttime=11:00&endtime=22:00"
+plot_ts <- gads_ts |> 
+  pivot_longer(c(Var_search, Var_pass), names_to = "Series") |> 
+  autoplot(value) +
+  labs(y = "Δ %",
+       title = "Δ % passengers and Δ % Google Ads Search Volume Years 2018-2022")
 
-# define a vector with numbers from 1 to 31 to compute the days for the URLs
+plot_ts
 
-days <- c(1:30)
+# Inspect seasonality
 
-# define the object "endDate" containing dates in proper format from 
-# tomorrow day and throughout the following 30 days.
+ts_seasons <- gads_ts |> 
+  gg_season(Var_search, labels = "both") +
+  labs(y = "Google Ads % Search Volume (#000)",
+       title = "Seasonal plot: Montly % Search Volume variation from Jan 2018 to Dec 2022")
+ts_seasons
 
-endDate <- mapply(function(a, b) a + b, tomorrow, days)
+# Seasonal sub-series
 
-# convert the vector from double to date format "%d/%m/%Y"
+ts_subseries <- gads_ts |> 
+  gg_subseries(Var_search)
+ts_subseries
 
-endDate <- as.Date(endDate, origin = "1970-01-01")
+# Check for the linear relationship between Search Volume variation and Passengers
+# variation (month over month)
 
-# clean the fold "download/"
+reg_rel <- gads_ts |> 
+  ggplot(aes(Var_pass, Var_search)) +
+  labs(x = "Number of passengers variation over time", y = "Search Volume variation over time", 
+       title = "Δ % of passengers vs Google Ads Search Volume (MoM - 2018-2022)") +
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE)
 
-unlink("~/rstudio/parkvia/download/*")
+# Decomposing the time series by the STL method (*)
 
-# Since I do not want to return any value but iterate through each value in the
-# object "endDate", I use purrr::walk function to save the html files so that
-# I can scrape them afterwards. Original code from Mikkel Freltoft Krogsholm.
+gads_dec <- gads_ts |> 
+  model(stl = STL(Var_search))
 
-walk(endDate, function(dates){
-  
-  file_day <- str_extract(dates, "\\d\\w+$")
-  
-  # define the URL for each "endDate" date contained in the object  
-  url_page <- str_glue("{base_url}{tomorrow}&endDate={dates}{url_time}")
-  
-  message(str_glue("\nFetching: {url_page}"))
-          
-  remDr$navigate(url_page)
-  
-  Sys.sleep(15)
-  
-  html_raw <- remDr$getPageSource()[[1]]
-  
-  # The fold "download/" is intended to be already created in the work directory
-  
-  html_file <- paste0("~/rstudio/parkvia/download/", file_day,".html")
-  
-  write_file(html_raw, html_file)
-})
+components(gads_dec) |> 
+  autoplot()
 
-# Close the session
+# Create a training and a testing data set to test the models
 
-remDr$close()
+train_search <- gads_ts |> 
+  slice(1:47)
 
-###### Loop over each HTML file to scrape data ################################
+test_search <- gads_ts |> 
+  slice(48:60)
 
-Sys.sleep(10)
+# Derive:
+      # 1- a (fit1) linear regression model for time series built using 
+      # the dependent variable Google Ads Search Volume (Δ%) 
+      # weighed with "passengers (Δ%)" as additive regressor.
+      
+      # 2 - a (fit2) linear regression model for time series made up of 
+      # the dependent variable Google Ads Search Volume (Δ), using trend and 
+      # season as dummy variables.
 
-html_files <- list.files("download/") %>% 
-  paste0("download/",.)
+      # 3 - a final (fit3) Exponential Smoothing model using the Holt-Winters’ method
+      # with additive trend and seasonal components.
 
-all_parks <- map_dfr(html_files, function(html_file){
-  
-  html_data <- read_html(html_file)
+fit <- train_search |> 
+      model(tslm1 = TSLM(Var_search ~ Var_pass + trend() + season()),
+            tslm2 = TSLM(Var_search ~ trend() + season()),
+            ets = ETS(Var_search ~ error("A") + trend("A") + season("A"))) # model
 
-  # extract the page element results except the ones grouped in the
-  # "not_available" CSS class
-  
-  parking_results <- html_data |> 
-    html_element("#opresults") |> 
-    html_elements(":not(not_available)") |> 
-    html_elements(".card")
-  
-  # extract check-in and check-out day from the web page and compute the length of stay
-  
-  day_in <- html_data %>% 
-    html_element("#dateFrom") %>% 
-    html_text()
-  
-  day_out <- html_data %>% 
-    html_element("#dateTo") %>% 
-    html_text()
-  
-  n_days <- unclass(as.Date(day_out, "%d/%m/%Y")) - 
-            unclass(as.Date(day_in, "%d/%m/%Y"))
-  
-  # Custom function for iterating the extraction of each parking detail 
-  # to compose a tibble data frame for each day of permanence
-  
-  fun_park <- function(single_result) {
-    
-    park_name <- single_result |> 
-      html_element(".op_head") |> 
-      html_text(trim = TRUE)
-    
-    details <- single_result |>
-      html_element(".card-body")
-    
-    stars <- single_result |> 
-      html_element(".stars") |> 
-      html_text(trim = TRUE)
-    
-    num_of_reviews <- single_result |> 
-      html_element(".reviewslink") |> 
-      html_text(trim = TRUE)
-    
-    first_price <- details |> 
-      html_element(".price") |> 
-      html_text(trim = TRUE)
-    
-    discount <- details |> 
-      html_element(".inner.d-inline") |> 
-      html_text(trim = TRUE)
-    
-    total_price <- single_result |> 
-      html_element(".w-auto.price") |> 
-      html_text(trim = TRUE)
-    
-    distance <- single_result %>% 
-      html_element(".distance") %>% 
-      html_text(trim = TRUE)
-    
-    more_info <- single_result %>% 
-      html_element(".features")
-    
-    # create the data frame
-    
-    tibble(n_days, park_name, stars, num_of_reviews, first_price, discount, 
-           total_price, distance)
-    
-  } # fun_park
-  
-  # For each "parking result", create a data frame by row-binding the tibble 
-  # above for each "parking_results" content by the purrr::map_dfr function
-  
-  map_dfr(parking_results, fun_park)
-  
-}) # all_parks
+# Measure the predictive accuracy of regressor for each model
 
-#### Clean and build the final data frames ####################################
+reg_assess <- glance(fit) |> 
+  select(adj_r_squared, AIC, BIC, CV)
 
-Sys.sleep(10)
+# Evaluate the models
 
-# clean the tibble data frame and transform the price variable
+fit1_eval <- gg_tsresiduals(fit1)
+fit2_eval <- gg_tsresiduals(fit2)
+fit3_eval <- gg_tsresiduals(fit3)
 
-all_parks_cleaned <- all_park %>% 
-  group_by(n_days) %>% 
-  filter(first_price != "Not Available") %>% 
-  mutate(price = as.numeric(str_extract(total_price, "\\d.+")), # Price column
-  position = row_number(price)) %>% # Position column based on prices applied
-  select(-first_price, -total_price) %>% 
-  arrange(n_days, price)
 
-# create a tibble data frame with the minimum price for each day.
-# Since equal minimum prices are shown as multiple values, I will use
-# the dplyr::slice_head function to pick the first value
 
-all_parks_min <- all_parks_cleaned %>% 
-  group_by(n_days) %>% 
-  slice_min(price) %>% 
-  slice_head()
+# Producing forecasts from the "fit" object adding the "test" data frame
 
-# write a CSV file
+fc_total <- fit |>
+   forecast(new_data = test_search)
 
-write.csv(all_parks_min, "~/path.../parkvia_min.csv", fileEncoding = "UTF-8") # Write a proper path to the file to be opened
 
-# create a summary tibble data frame
+# Plot the forecast over the testing period data frame
 
-all_parks_sum <- all_parks_cleaned %>%
-  group_by(n_days) %>% 
-  summarise(
-            "min_price (€)" = min(price, na.rm = TRUE),
-            "D1 (€)" = quantile(price, probs = 0.10, na.rm = TRUE),
-            "Q1 (€)" = round(quantile(price, probs = 0.25, na.rm = TRUE),2),
-            "median_price (€)" = round(median(price, na.rm = TRUE), 2),
-            "Q3 (€)" = round(quantile(price, probs = 0.75, na.rm = TRUE),2),
-            "D9 (€)" = quantile(price, probs = 0.90, na.rm = TRUE),
-            "max_price (€)" = max(price, na.rm = TRUE),
-            "IDR" = quantile(price, probs = 0.90, na.rm = TRUE) -
-                    quantile(price, probs = 0.10, na.rm = TRUE)
-              ) # summarise
+gads_ts |> 
+           autoplot(Var_search) +
+           autolayer(fc_total, level = NULL)
 
-# To have a clearer picture, a useful column to add to the summary data frame
-# is the value related to the second less expensive price.
-# Since there are repeated rows, I will proceed to create a simple data frame
-# and then add the column "2nd_pos_price" to the summary data frame above
+fit_search <- gads_ts |> 
+       model(TSLM(
+           Var_search ~ Var_pass + trend() + season())) # model
 
-sec_pos <- all_parks_cleaned %>% 
-  group_by(n_days) %>% 
-  slice_head(n = 2) %>% 
-  slice_head() %>% 
-  select(n_days, price)
+# Create 
 
-# Then I add the "2nd_pos_price" column in a new tibble data frame
+snaive_pass_fc <- gads_ts |> 
+     model(SNAIVE(Var_pass))
 
-price_summary <- tibble(all_parks_sum, "2nd_pos_price" = sec_pos$price)
+fc_naive <- snaive_pass_fc |>
+forecast(h = "3 months")
 
-# write the summary CSV file
 
-write.csv(price_summary, "~/yourpath.../price_summary.csv", fileEncoding = "UTF-8") # Write a proper path to the file to be opened
+# Create two scenarios with the historical average variation of passengers 
+# volume and one scenario where the forecasted value of passenger volume 
+# is derived using the seasonal naive model
+
+new_trend <- scenarios (
+  "pass_avg" = new_data(gads_ts, 3) |> 
+    mutate(Var_pass = mean(gads_ts$Var_pass)),
+  "pass_snaive" = new_data(gads_ts, 3) |> 
+    mutate(Var_pass = fc_naive$.mean)) # scenarios
+
+# Forecast the variations
+
+fcast <- forecast(fit_search, new_trend)
+
+# Plot the time series search volume variation forecast
+
+gads_ts |> 
+       autoplot(Var_search) +
+       autolayer(fcast, level = NULL) +
+       labs(title = "3 months variation forecast", y = "Δ % change")
+
+# Create a tibble data frame with three months forecast search volume variation
+
+var_forecast <- tibble(date = fcast$date, scenario = fcast$.scenario, 
+                       "search_volume_fc (Δ %)" = fcast$.mean)
+
+# (*) Hyndman, R.J., & Athanasopoulos, G. (2021) Forecasting: principles 
+# and practice, 3rd edition, OTexts: Melbourne, Australia. OTexts.com/fpp3.
+# Accessed on 2024-02-05.
+
+
